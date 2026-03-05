@@ -1,0 +1,100 @@
+services:
+
+  # ── pgvector ──────────────────────────────────────────────────────────────
+  pgvector:
+    image: pgvector/pgvector:pg17
+    container_name: vault-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-obsidian}
+      POSTGRES_USER: ${PGUSER:-postgres}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-obsidian}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Embeddings service ────────────────────────────────────────────────────
+  embeddings:
+    build:
+      context: ./embeddings
+      dockerfile: Dockerfile
+    container_name: vault-embeddings
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      EMBED_MODEL: mixedbread-ai/mxbai-embed-large-v1
+      PORT: 8765
+    volumes:
+      - embed_model_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ── MCP server ────────────────────────────────────────────────────────────
+  mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: vault-mcp
+    restart: unless-stopped
+    ports:
+      - "3456:3456"
+    environment:
+      PGHOST: pgvector
+      PGPORT: 5432
+      PGDATABASE: ${PGDATABASE:-obsidian}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
+      EMBED_URL: http://embeddings:8765/embed
+      EMBED_DIM: 1024
+      MCP_PORT: 3456
+      MCP_TRANSPORT: http
+      MCP_API_KEY: ${MCP_API_KEY:?MCP_API_KEY is required}
+      VAULT_PATH: /vault
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+    volumes:
+      - ./mcp-server/server.js:/app/server.js:ro
+      - ${VAULT_PATH:?VAULT_PATH is required}:/vault:rw
+
+  # ── Sync daemon ───────────────────────────────────────────────────────────
+  sync:
+    build:
+      context: ./sync
+      dockerfile: Dockerfile
+    container_name: vault-sync
+    restart: unless-stopped
+    environment:
+      VAULT_PATH: /vault
+      EMBED_URL: http://embeddings:8765/embed
+      PGHOST: pgvector
+      PGPORT: 5432
+      PGDATABASE: ${PGDATABASE:-obsidian}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
+      SYNC_INTERVAL_SEC: ${SYNC_INTERVAL_SEC:-900}
+    volumes:
+      - ${VAULT_PATH:?VAULT_PATH is required}:/vault:ro
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+volumes:
+  pgvector_data:
+  embed_model_cache:
