@@ -28,6 +28,7 @@ embeddings-service/
 
 # macOS
 .DS_Store
+*.plist
 
 # Editor
 .vscode/
