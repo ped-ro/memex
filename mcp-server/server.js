@@ -1,6 +1,6 @@
 /**
  * Vault MCP Server
- * Hybrid semantic + full-text search over an Obsidian vault via pgvector.
+ * Hybrid semantic + full-text search over a personal knowledge base via pgvector.
  *
  * Transports:
  *   - stdio  (default)              → Claude Desktop on workstation
@@ -192,7 +192,7 @@ function registerTools(server) {
 // ── Tool: search_vault ────────────────────────────────────────────────────────
 server.tool(
   "search_vault",
-  "Hybrid semantic + keyword search over your Obsidian vault. Combines vector similarity and full-text search using RRF fusion for best results. Use this to find notes by concept, topic, or exact terms.",
+  "Hybrid semantic + keyword search over your personal knowledge base. Combines vector similarity and full-text search using RRF fusion for best results. Use this to find notes by concept, topic, or exact terms.",
   {
     query:        z.string().describe("Search query — natural language or keywords"),
     limit:        z.number().int().min(1).max(20).optional().default(8).describe("Max results to return"),
@@ -596,7 +596,7 @@ server.tool(
 }
 
 // Create server for stdio mode
-const server = new McpServer({ name: "vault-search", version: "1.0.0" });
+const server = new McpServer({ name: "memex", version: "1.0.0" });
 registerTools(server);
 
 // ── Transport ─────────────────────────────────────────────────────────────────
@@ -627,7 +627,7 @@ if (TRANSPORT === "http") {
   const sessions = new Map(); // sessionId -> { transport, server }
 
   function createSessionServer() {
-    const s = new McpServer({ name: "vault-search", version: "1.0.0" });
+    const s = new McpServer({ name: "memex", version: "1.0.0" });
     registerTools(s);
     return s;
   }

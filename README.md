@@ -1,6 +1,6 @@
-# obsidian-vault-search
+# memex
 
-Local semantic search over your Obsidian vault, exposed as an MCP server for Claude, ChatGPT, and any HTTP client.
+A personal knowledge engine. Semantic search, MCP server, and sync stack for your second brain — exposed to Claude, ChatGPT, and any HTTP client.
 
 **No cloud. No subscriptions. Everything runs on your machine.**
 
@@ -34,13 +34,13 @@ MCP server (Node.js, port 3456)
 - Docker + Docker Compose
 - ~4GB disk for the embedding model (downloaded on first build)
 - ~500MB RAM for the embeddings service at idle
-- Your Obsidian vault accessible as a local directory
+- Your notes accessible as a local directory (Obsidian, Markdown files, etc.)
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/obsidian-vault-search
-cd obsidian-vault-search
+git clone https://github.com/ped-ro/memex
+cd memex
 
 # 1. Configure
 cp .env.example .env
@@ -64,7 +64,7 @@ All config lives in `.env`. Copy `.env.example` to get started:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `VAULT_PATH` | ✅ | — | Absolute path to your Obsidian vault |
+| `VAULT_PATH` | ✅ | — | Absolute path to your notes directory |
 | `PGPASSWORD` | ✅ | — | PostgreSQL password |
 | `MCP_API_KEY` | ✅ | — | API key for MCP/REST auth (`openssl rand -hex 32`) |
 | `PGDATABASE` | | `obsidian` | Database name |
@@ -78,7 +78,7 @@ Add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "vault-search": {
+    "memex": {
       "command": "npx",
       "args": [
         "mcp-remote",

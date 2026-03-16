@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pete.vault-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/pete/.openclaw/workspace/vault-search/watchdog_sync.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VAULT_PATH</key>
+        <string>/Users/pete/Documents/Obsidian</string>
+        <key>EMBED_URL</key>
+        <string>http://localhost:8765/embed</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/pete/.openclaw/workspace/vault-search/logs/sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/pete/.openclaw/workspace/vault-search/logs/sync.log</string>
+</dict>
+</plist>

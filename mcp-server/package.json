@@ -1,7 +1,7 @@
 {
   "name": "vault-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Obsidian vault — hybrid semantic + full-text search via pgvector",
+  "description": "memex MCP server — hybrid semantic + full-text search over your personal knowledge base via pgvector",
   "type": "module",
   "main": "server.js",
   "scripts": {
