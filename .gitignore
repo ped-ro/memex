@@ -24,7 +24,6 @@ sync.py.bak
 vault_import.py
 migrate.py
 watchdog_sync.py
-embeddings-service/
 
 # macOS
 .DS_Store
@@ -33,3 +32,6 @@ embeddings-service/
 # Editor
 .vscode/
 .idea/
+
+# Backup files
+*.bak

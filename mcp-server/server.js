@@ -593,6 +593,106 @@ server.tool(
   }
 );
 
+
+// ── ChatGPT Compatibility Aliases ─────────────────────────────────────────────
+// ChatGPT (non-Developer Mode) requires tools named exactly "search" and "fetch".
+// These are thin wrappers around search_vault and get_note respectively.
+// All other clients (Claude Desktop, Claude Code, Monina) continue using the
+// original tool names — these aliases are additive only.
+
+server.tool(
+  "search",
+  "Search the knowledge vault for notes matching a query. Returns matching note IDs and summaries. Use this to find relevant information, then use 'fetch' to read full notes.",
+  {
+    query: z.string().describe("Search query — natural language or keywords"),
+    limit: z.number().int().min(1).max(20).optional().default(8).describe("Max results"),
+  },
+  async ({ query: q, limit = 8 }) => {
+    let embedding;
+    try {
+      let embedQuery = q;
+      if (q.split(/\s+/).length <= 4) {
+        embedQuery = `${q} — detailed notes and how-to covering this topic`;
+      }
+      embedding = await embedText(embedQuery);
+    } catch (e) {
+      const fts = await query(`
+        SELECT DISTINCT ON (c.note_path)
+          c.note_path, n.title, n.tags, n.note_type, c.content,
+          ts_rank_cd(c.content_tsv, plainto_tsquery('english', $1)) AS score
+        FROM chunks c JOIN notes n ON c.note_path = n.path
+        WHERE c.content_tsv @@ plainto_tsquery('english', $1)
+        ORDER BY c.note_path, score DESC LIMIT $2
+      `, [q, limit]);
+      return { content: [{ type: "text", text: JSON.stringify({
+        ids: fts.rows.map(r => r.note_path),
+        results: fts.rows.map(r => ({
+          id: r.note_path, title: r.title, tags: r.tags || [],
+          type: r.note_type, snippet: r.content.slice(0, 300),
+        })),
+      }, null, 2) }] };
+    }
+
+    const embStr = `[${embedding.join(",")}]`;
+    const res2 = await query(
+      `SELECT * FROM search_hybrid($1, $2::vector, $3, $4)`,
+      [q, embStr, limit * 2, null]
+    );
+
+    // Time-decay
+    const now = Date.now();
+    for (const r of res2.rows) {
+      if (r.modified_at) {
+        const ageDays = (now - new Date(r.modified_at).getTime()) / 86400000;
+        const decayFactor = Math.exp(-ageDays / 90);
+        const orig = parseFloat(r.rrf_score || 0);
+        r.rrf_score = String(orig * (0.7 + 0.3 * decayFactor));
+      }
+    }
+
+    applyMetaPenalty(res2.rows);
+    const deduped = deduplicateByNote(res2.rows, limit);
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      ids: deduped.map(r => r.path || r.note_path),
+      results: deduped.map(r => ({
+        id:    r.path || r.note_path,
+        title: r.title,
+        tags:  r.tags || [],
+        type:  r.type || r.note_type,
+        snippet: (r.content || "").slice(0, 300),
+      })),
+    }, null, 2) }] };
+  }
+);
+
+server.tool(
+  "fetch",
+  "Fetch the full content of a note by its ID (vault path). Use after 'search' to read a specific note.",
+  {
+    id: z.string().describe("Note ID (vault path) from search results, e.g. '020 Domains/Home Lab/foo.md'"),
+  },
+  async ({ id: notePath }) => {
+    const meta = await query("SELECT * FROM notes WHERE path = $1", [notePath]);
+    if (!meta.rows.length) {
+      return { content: [{ type: "text", text: `Note not found: ${notePath}` }] };
+    }
+
+    const note = meta.rows[0];
+    const content = readVaultFile(notePath);
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      id:          note.path,
+      title:       note.title,
+      tags:        note.tags || [],
+      type:        note.note_type,
+      modified:    note.modified_at,
+      frontmatter: note.frontmatter,
+      content:     content || "(file not readable — vault may not be mounted)",
+    }, null, 2) }] };
+  }
+);
+
 }
 
 // Create server for stdio mode
