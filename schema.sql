@@ -1,7 +1,7 @@
 -- Vault Search Schema
 -- pgvector 0.8.2 (Docker local)
 -- Hybrid search: vector (HNSW) + full-text (tsvector) + wiki-link graph
--- Embeddings: sentence-transformers all-MiniLM-L6-v2 (384 dimensions)
+-- Embeddings: OpenAI text-embedding-3-small (1536 dimensions)
 
 -- ============================================================
 -- NOTES: one row per vault file, metadata only
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS notes (
     frontmatter     JSONB,                      -- full frontmatter as JSONB (flexible, queryable)
     wikilinks       TEXT[],                     -- outgoing [[wikilinks]] extracted from content
     word_count      INT,                        -- rough word count for context budget planning
+    content_hash    TEXT,                       -- SHA-256 of note content for change detection
     indexed_at      TIMESTAMPTZ DEFAULT now()   -- when we last indexed this note
 );
 
@@ -34,7 +35,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index     INT NOT NULL,               -- position within note (0-based)
     content         TEXT NOT NULL,              -- raw chunk text
     token_count     INT,                        -- approximate token count
-    embedding       vector(384),                -- sentence-transformers all-MiniLM-L6-v2
+    embedding       vector(1536),                -- OpenAI text-embedding-3-small
     content_tsv     TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     UNIQUE (note_path, chunk_index)
 );

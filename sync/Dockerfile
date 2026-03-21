@@ -13,7 +13,8 @@ RUN pip install --no-cache-dir \
     requests \
     schedule
 
-COPY sync_daemon.py .
-# vault_import.py and sync.py are mounted from host at runtime
+COPY sync/sync_daemon.py .
+COPY sync.py ./host/sync.py
+COPY vault_import.py ./host/vault_import.py
 
 CMD ["python", "sync_daemon.py"]

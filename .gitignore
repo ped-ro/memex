@@ -19,11 +19,6 @@ __pycache__/
 venv/
 
 # Old/scratch files
-sync.py
-sync.py.bak
-vault_import.py
-migrate.py
-watchdog_sync.py
 
 # macOS
 .DS_Store
@@ -35,3 +30,8 @@ watchdog_sync.py
 
 # Backup files
 *.bak
+
+# Scratch / historical
+migrate.py
+watchdog_sync.py
+mcp-server/server.js.pre-oauth

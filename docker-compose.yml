@@ -9,8 +9,8 @@ services:
       POSTGRES_DB: ${PGDATABASE:-obsidian}
       POSTGRES_USER: ${PGUSER:-postgres}
       POSTGRES_PASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
-    ports:
-      - "5433:5432"
+    # ports:              # internal only — no host exposure needed
+    #   - "5433:5432"
     volumes:
       - pgvector_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
@@ -23,23 +23,22 @@ services:
   # ── Embeddings service ────────────────────────────────────────────────────
   embeddings:
     build:
-      context: ./embeddings
+      context: ./embeddings-service
       dockerfile: Dockerfile
     container_name: vault-embeddings
     restart: unless-stopped
-    ports:
-      - "8765:8765"
+    # ports:              # internal only — no host exposure needed
+    #   - "8765:8765"
     environment:
-      EMBED_MODEL: mixedbread-ai/mxbai-embed-large-v1
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      EMBED_MODEL: text-embedding-3-small
       PORT: 8765
-    volumes:
-      - embed_model_cache:/root/.cache/huggingface
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 60s
+      start_period: 30s
 
   # ── MCP server ────────────────────────────────────────────────────────────
   mcp:
@@ -49,7 +48,7 @@ services:
     container_name: vault-mcp
     restart: unless-stopped
     ports:
-      - "3456:3456"
+      - "127.0.0.1:3456:3456"
     environment:
       PGHOST: pgvector
       PGPORT: 5432
@@ -57,7 +56,7 @@ services:
       PGUSER: ${PGUSER:-postgres}
       PGPASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
       EMBED_URL: http://embeddings:8765/embed
-      EMBED_DIM: 1024
+      EMBED_DIM: 1536
       MCP_PORT: 3456
       MCP_TRANSPORT: http
       MCP_API_KEY: ${MCP_API_KEY:?MCP_API_KEY is required}
@@ -74,8 +73,8 @@ services:
   # ── Sync daemon ───────────────────────────────────────────────────────────
   sync:
     build:
-      context: ./sync
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: sync/Dockerfile
     container_name: vault-sync
     restart: unless-stopped
     environment:
@@ -97,4 +96,5 @@ services:
 
 volumes:
   pgvector_data:
-  embed_model_cache:
+    external: true
+    name: vault-search_pgvector_data

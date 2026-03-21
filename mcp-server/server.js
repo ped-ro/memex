@@ -24,6 +24,12 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "fs";
 import { createServer } from "http";
 import express from "express";
+import crypto from "crypto";
+import net from "net";
+// ── Instance identity ──────────────────────────────────────────────────────────
+const INSTANCE_ID = crypto.randomUUID();
+const STARTED_AT = new Date().toISOString();
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const DB_CONFIG = {
@@ -709,18 +715,124 @@ if (TRANSPORT === "http") {
   const API_KEY = process.env.MCP_API_KEY || "";
   if (API_KEY) {
     app.use((req, res, next) => {
-      // Health check is public for monitoring
-      if (req.path === "/health") return next();
+      // Public endpoints — no auth required
+      const publicPaths = ["/health", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"];
+      if (publicPaths.includes(req.path)) return next();
       const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
       const header  = req.headers["x-api-key"] || "";
       const qparam  = req.query.key || "";
+      // API key auth (existing clients)
       if (bearer === API_KEY || header === API_KEY || qparam === API_KEY) return next();
+      // OAuth Bearer token auth (ChatGPT)
+      if (bearer && oauthTokens.has(bearer)) return next();
       res.status(401).json({ error: "Unauthorized — invalid or missing API key" });
     });
     console.error("🔐 API key auth enabled");
+
+  // ── OAuth 2.0 Provider (ChatGPT connector) ──────────────────────────────
+  // Minimal OAuth 2.0 authorization code flow for ChatGPT non-Developer Mode.
+  // Single-user, in-memory. Restart clears tokens — ChatGPT re-registers.
+  const oauthClients = new Map();   // client_id -> { client_id, client_secret, redirect_uris }
+  const oauthCodes   = new Map();   // code -> { client_id, redirect_uri, expires }
+  const oauthTokens  = new Map();   // token -> { client_id, created }
+
   } else {
     console.error("⚠️  No MCP_API_KEY set — running without auth");
   }
+
+
+
+  // ── OAuth 2.0 Endpoints ─────────────────────────────────────────────────
+
+  // Discovery metadata
+  app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    const issuer = `${req.protocol}://${req.get("host")}`;
+    res.json({
+      issuer,
+      authorization_endpoint: `${issuer}/authorize`,
+      token_endpoint: `${issuer}/token`,
+      registration_endpoint: `${issuer}/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+      code_challenge_methods_supported: ["S256", "plain"],
+    });
+  });
+
+  // Dynamic client registration
+  app.post("/register", (req, res) => {
+    const clientId = crypto.randomUUID();
+    const clientSecret = crypto.randomBytes(32).toString("hex");
+    const redirectUris = req.body.redirect_uris || [];
+    oauthClients.set(clientId, { client_id: clientId, client_secret: clientSecret, redirect_uris: redirectUris });
+    console.error(`\u{1f511} OAuth client registered: ${clientId}`);
+    res.status(201).json({
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uris: redirectUris,
+      token_endpoint_auth_method: "client_secret_post",
+    });
+  });
+
+  // Authorization endpoint — auto-approve (single-user)
+  app.get("/authorize", (req, res) => {
+    const { client_id, redirect_uri, state, response_type, code_challenge, code_challenge_method } = req.query;
+    if (!client_id || !redirect_uri) {
+      return res.status(400).send("Missing client_id or redirect_uri");
+    }
+    const authCode = crypto.randomBytes(32).toString("hex");
+    oauthCodes.set(authCode, {
+      client_id,
+      redirect_uri,
+      code_challenge: code_challenge || null,
+      code_challenge_method: code_challenge_method || null,
+      expires: Date.now() + 5 * 60 * 1000,
+    });
+    console.error(`\u{1f511} OAuth code issued for client: ${client_id}`);
+    const url = new URL(redirect_uri);
+    url.searchParams.set("code", authCode);
+    if (state) url.searchParams.set("state", state);
+    res.redirect(url.toString());
+  });
+
+  // Token exchange
+  app.post("/token", (req, res) => {
+    const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier } = req.body;
+    if (grant_type !== "authorization_code") {
+      return res.status(400).json({ error: "unsupported_grant_type" });
+    }
+    const codeEntry = oauthCodes.get(code);
+    if (!codeEntry) {
+      return res.status(400).json({ error: "invalid_grant", error_description: "Invalid or expired authorization code" });
+    }
+    if (codeEntry.expires < Date.now()) {
+      oauthCodes.delete(code);
+      return res.status(400).json({ error: "invalid_grant", error_description: "Authorization code expired" });
+    }
+    if (codeEntry.code_challenge) {
+      if (!code_verifier) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required" });
+      }
+      let computed;
+      if (codeEntry.code_challenge_method === "S256") {
+        computed = crypto.createHash("sha256").update(code_verifier).digest("base64url");
+      } else {
+        computed = code_verifier;
+      }
+      if (computed !== codeEntry.code_challenge) {
+        return res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+      }
+    }
+    oauthCodes.delete(code);
+    const accessToken = crypto.randomBytes(48).toString("hex");
+    oauthTokens.set(accessToken, { client_id: codeEntry.client_id, created: Date.now() });
+    console.error(`\u{1f511} OAuth token issued for client: ${codeEntry.client_id}`);
+    res.json({
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: 86400 * 365,
+    });
+  });
 
 
   // ── Session Management ────────────────────────────────────────────────────
@@ -878,6 +990,9 @@ if (TRANSPORT === "http") {
 
       res.json({
         status,
+        instance_id: INSTANCE_ID,
+        started_at: STARTED_AT,
+        container: process.env.HOSTNAME || "unknown",
         db: "connected",
         transport: "http",
         port: HTTP_PORT,
@@ -959,12 +1074,25 @@ if (TRANSPORT === "http") {
     }
   });
 
-  app.listen(HTTP_PORT, "0.0.0.0", () => {
-    console.error(`✅ Vault MCP server (HTTP) listening on :${HTTP_PORT}`);
-    console.error(`   MCP endpoint: http://0.0.0.0:${HTTP_PORT}/mcp`);
-    console.error(`   Health:       http://0.0.0.0:${HTTP_PORT}/health`);
-    console.error(`   REST search:  http://0.0.0.0:${HTTP_PORT}/search`);
+  // ── Port-in-use guard ──────────────────────────────────────────────────────
+  const portCheck = net.createServer();
+  portCheck.once("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`FATAL: Port ${HTTP_PORT} already in use — aborting startup`);
+      process.exit(1);
+    }
   });
+  portCheck.once("listening", () => {
+    portCheck.close(() => {
+      app.listen(HTTP_PORT, "0.0.0.0", () => {
+        console.error(`✅ Vault MCP server (HTTP) listening on :${HTTP_PORT}  [instance: ${INSTANCE_ID}]`);
+        console.error(`   MCP endpoint: http://0.0.0.0:${HTTP_PORT}/mcp`);
+        console.error(`   Health:       http://0.0.0.0:${HTTP_PORT}/health`);
+        console.error(`   REST search:  http://0.0.0.0:${HTTP_PORT}/search`);
+      });
+    });
+  });
+  portCheck.listen(HTTP_PORT, "0.0.0.0");
 } else {
   // Default: stdio transport
   const transport = new StdioServerTransport();
