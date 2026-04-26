@@ -46,16 +46,19 @@ EMBEDDINGS_DIM   = int(os.environ.get("EMBEDDINGS_DIM", "384"))
 
 CHUNK_TOKENS    = 512       # target tokens per chunk
 CHUNK_OVERLAP   = 50        # overlap tokens between chunks
-EMBED_BATCH     = 32        # chunks per embedding API call (reduced from 100 — mxbai-large OOMs on M1 at 100)
+EMBED_BATCH     = 32        # chunks per embedding API call
 SKIP_DIRS       = {".git", ".obsidian", ".trash", ".semantic-search"}
 SKIP_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".pdf", ".mp3", ".mp4", ".zip"}
 
 # Notes whose relative path contains any of these substrings are skipped entirely.
 # Use this to exclude credential-bearing or sensitive notes from the search index.
 SKIP_PATH_SUBSTRINGS = {
-    "MCP Auth",        # contains API keys
-    "credentials",
-    "secrets",
+    "mcp auth",          # contains API keys (case-insensitive match below)
+    "/credentials/",     # folder match
+    "/secrets/",
+    " api key",          # filename pattern
+    " client secret",
+    " api token",
 }
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
@@ -177,7 +180,7 @@ def scan_vault(vault_root: Path) -> list[dict]:
             continue
         # Skip notes with sensitive content (credentials, API keys)
         rel_str = str(md_file.relative_to(vault_root))
-        if any(pat in rel_str for pat in SKIP_PATH_SUBSTRINGS):
+        if any(pat in rel_str.lower() for pat in SKIP_PATH_SUBSTRINGS):
             continue
 
         note = parse_note(md_file, vault_root)

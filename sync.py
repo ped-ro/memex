@@ -27,7 +27,7 @@ from vault_import import (
 
 import psycopg2.extras
 
-EMBED_BATCH = 32   # match vault_import.py ??? mxbai-large OOMs on M1 at 100
+EMBED_BATCH = 32   # match vault_import.py
 
 
 # ── Safety ────────────────────────────────────────────────────────────────────

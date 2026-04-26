@@ -27,8 +27,8 @@ services:
       dockerfile: Dockerfile
     container_name: vault-embeddings
     restart: unless-stopped
-    # ports:              # internal only — no host exposure needed
-    #   - "8765:8765"
+    ports:
+      - "127.0.0.1:8765:8765"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
       EMBED_MODEL: text-embedding-3-small
@@ -88,6 +88,10 @@ services:
       SYNC_INTERVAL_SEC: ${SYNC_INTERVAL_SEC:-900}
     volumes:
       - ${VAULT_PATH:?VAULT_PATH is required}:/vault:ro
+      # Source files mounted so filter/logic patches do not require image rebuild
+      - ./vault_import.py:/app/host/vault_import.py:ro
+      - ./sync.py:/app/host/sync.py:ro
+      - ./sync/sync_daemon.py:/app/sync_daemon.py:ro
     depends_on:
       pgvector:
         condition: service_healthy
