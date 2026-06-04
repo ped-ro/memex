@@ -1,7 +1,9 @@
 -- Vault Search Schema
 -- pgvector 0.8.2 (Docker local)
 -- Hybrid search: vector (HNSW) + full-text (tsvector) + wiki-link graph
--- Embeddings: OpenAI text-embedding-3-small (1536 dimensions)
+-- Embeddings: mixedbread-ai/mxbai-embed-large-v1 (1024 dimensions)
+
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================
 -- NOTES: one row per vault file, metadata only
@@ -35,7 +37,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index     INT NOT NULL,               -- position within note (0-based)
     content         TEXT NOT NULL,              -- raw chunk text
     token_count     INT,                        -- approximate token count
-    embedding       vector(1536),                -- OpenAI text-embedding-3-small
+    embedding       vector(1024),                -- mixedbread-ai/mxbai-embed-large-v1
     content_tsv     TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     UNIQUE (note_path, chunk_index)
 );
@@ -180,5 +182,31 @@ CREATE TABLE IF NOT EXISTS sync_log (
     notes_updated   INT DEFAULT 0,
     notes_deleted   INT DEFAULT 0,
     chunks_total    INT DEFAULT 0,
-    duration_ms     INT
+    duration_ms     INT,
+    notes_failed    INT DEFAULT 0,
+    failed_paths    TEXT[] DEFAULT ARRAY[]::TEXT[],
+    status          TEXT DEFAULT 'ok',
+    error           TEXT
 );
+
+ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS notes_failed INT DEFAULT 0;
+ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS failed_paths TEXT[] DEFAULT ARRAY[]::TEXT[];
+ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ok';
+ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS error TEXT;
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id       TEXT PRIMARY KEY,
+    client_secret   TEXT,
+    redirect_uris   TEXT[] DEFAULT ARRAY[]::TEXT[],
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+    token           TEXT PRIMARY KEY,
+    client_id       TEXT REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    expires_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS oauth_tokens_client_idx ON oauth_tokens (client_id);
+CREATE INDEX IF NOT EXISTS oauth_tokens_expires_idx ON oauth_tokens (expires_at);

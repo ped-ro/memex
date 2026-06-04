@@ -65,19 +65,36 @@ async function query(sql, params = []) {
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Embed text via local sentence-transformers service (all-MiniLM-L6-v2, 384-dim).
- * No OpenAI dependency — zero API cost.
+ * Embed text via local sentence-transformers service.
+ * The returned dimension must match the pgvector schema.
  */
 async function embedText(text) {
-  const resp = await fetch(EMBED_URL, {
+  const resp = await fetchWithTimeout(EMBED_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ texts: [text], is_query: true }),
-  });
+  }, 30000);
   if (!resp.ok) throw new Error(`Embed service error: ${resp.status}`);
   const data = await resp.json();
-  return data.embeddings[0];
+  const embedding = data.embeddings?.[0];
+  if (!Array.isArray(embedding)) {
+    throw new Error("Embed service returned no embedding");
+  }
+  if (embedding.length !== EMBED_DIM) {
+    throw new Error(`Embed dimension mismatch: got ${embedding.length}, expected ${EMBED_DIM}`);
+  }
+  return embedding;
 }
 
 // ── Dedup ─────────────────────────────────────────────────────────────────────
@@ -710,32 +727,44 @@ registerTools(server);
 if (TRANSPORT === "http") {
   const app = express();
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+
+  // Short-lived authorization codes stay in memory; durable clients/tokens live in Postgres.
+  const oauthCodes = new Map(); // code -> { client_id, redirect_uri, expires }
+
+  async function oauthTokenValid(token) {
+    if (!token) return false;
+    const result = await query(`
+      SELECT 1
+      FROM oauth_tokens
+      WHERE token = $1
+        AND (expires_at IS NULL OR expires_at > now())
+      LIMIT 1
+    `, [token]);
+    return result.rowCount > 0;
+  }
 
   // ── API Key Auth ──────────────────────────────────────────────────────────
   const API_KEY = process.env.MCP_API_KEY || "";
   if (API_KEY) {
-    app.use((req, res, next) => {
-      // Public endpoints — no auth required
-      const publicPaths = ["/health", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"];
-      if (publicPaths.includes(req.path)) return next();
-      const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-      const header  = req.headers["x-api-key"] || "";
-      const qparam  = req.query.key || "";
-      // API key auth (existing clients)
-      if (bearer === API_KEY || header === API_KEY || qparam === API_KEY) return next();
-      // OAuth Bearer token auth (ChatGPT)
-      if (bearer && oauthTokens.has(bearer)) return next();
-      res.status(401).json({ error: "Unauthorized — invalid or missing API key" });
+    app.use(async (req, res, next) => {
+      try {
+        // Public endpoints — no auth required
+        const publicPaths = ["/health", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"];
+        if (publicPaths.includes(req.path)) return next();
+        const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+        const header  = req.headers["x-api-key"] || "";
+        const qparam  = req.query.key || "";
+        // API key auth (existing clients)
+        if (bearer === API_KEY || header === API_KEY || qparam === API_KEY) return next();
+        // OAuth Bearer token auth (ChatGPT)
+        if (bearer && await oauthTokenValid(bearer)) return next();
+        res.status(401).json({ error: "Unauthorized — invalid or missing API key" });
+      } catch (e) {
+        res.status(503).json({ error: `Auth check failed: ${e.message}` });
+      }
     });
     console.error("🔐 API key auth enabled");
-
-  // ── OAuth 2.0 Provider (ChatGPT connector) ──────────────────────────────
-  // Minimal OAuth 2.0 authorization code flow for ChatGPT non-Developer Mode.
-  // Single-user, in-memory. Restart clears tokens — ChatGPT re-registers.
-  const oauthClients = new Map();   // client_id -> { client_id, client_secret, redirect_uris }
-  const oauthCodes   = new Map();   // code -> { client_id, redirect_uri, expires }
-  const oauthTokens  = new Map();   // token -> { client_id, created }
-
   } else {
     console.error("⚠️  No MCP_API_KEY set — running without auth");
   }
@@ -760,11 +789,14 @@ if (TRANSPORT === "http") {
   });
 
   // Dynamic client registration
-  app.post("/register", (req, res) => {
+  app.post("/register", async (req, res) => {
     const clientId = crypto.randomUUID();
     const clientSecret = crypto.randomBytes(32).toString("hex");
-    const redirectUris = req.body.redirect_uris || [];
-    oauthClients.set(clientId, { client_id: clientId, client_secret: clientSecret, redirect_uris: redirectUris });
+    const redirectUris = Array.isArray(req.body.redirect_uris) ? req.body.redirect_uris : [];
+    await query(`
+      INSERT INTO oauth_clients (client_id, client_secret, redirect_uris)
+      VALUES ($1, $2, $3)
+    `, [clientId, clientSecret, redirectUris]);
     console.error(`\u{1f511} OAuth client registered: ${clientId}`);
     res.status(201).json({
       client_id: clientId,
@@ -775,28 +807,45 @@ if (TRANSPORT === "http") {
   });
 
   // Authorization endpoint — auto-approve (single-user)
-  app.get("/authorize", (req, res) => {
+  app.get("/authorize", async (req, res) => {
     const { client_id, redirect_uri, state, response_type, code_challenge, code_challenge_method } = req.query;
     if (!client_id || !redirect_uri) {
       return res.status(400).send("Missing client_id or redirect_uri");
     }
+    if (response_type && response_type !== "code") {
+      return res.status(400).send("Unsupported response_type");
+    }
+    const clientId = String(client_id);
+    const redirectUri = String(redirect_uri);
+    const client = await query(`
+      SELECT redirect_uris
+      FROM oauth_clients
+      WHERE client_id = $1
+    `, [clientId]);
+    if (!client.rowCount) {
+      return res.status(400).send("Unknown client_id");
+    }
+    const registeredRedirects = client.rows[0].redirect_uris || [];
+    if (registeredRedirects.length && !registeredRedirects.includes(redirectUri)) {
+      return res.status(400).send("redirect_uri is not registered for this client");
+    }
     const authCode = crypto.randomBytes(32).toString("hex");
     oauthCodes.set(authCode, {
-      client_id,
-      redirect_uri,
+      client_id: clientId,
+      redirect_uri: redirectUri,
       code_challenge: code_challenge || null,
       code_challenge_method: code_challenge_method || null,
       expires: Date.now() + 5 * 60 * 1000,
     });
-    console.error(`\u{1f511} OAuth code issued for client: ${client_id}`);
-    const url = new URL(redirect_uri);
+    console.error(`\u{1f511} OAuth code issued for client: ${clientId}`);
+    const url = new URL(redirectUri);
     url.searchParams.set("code", authCode);
     if (state) url.searchParams.set("state", state);
     res.redirect(url.toString());
   });
 
   // Token exchange
-  app.post("/token", (req, res) => {
+  app.post("/token", async (req, res) => {
     const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier } = req.body;
     if (grant_type !== "authorization_code") {
       return res.status(400).json({ error: "unsupported_grant_type" });
@@ -808,6 +857,24 @@ if (TRANSPORT === "http") {
     if (codeEntry.expires < Date.now()) {
       oauthCodes.delete(code);
       return res.status(400).json({ error: "invalid_grant", error_description: "Authorization code expired" });
+    }
+    if (redirect_uri && redirect_uri !== codeEntry.redirect_uri) {
+      return res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
+    }
+    if (client_id && client_id !== codeEntry.client_id) {
+      return res.status(400).json({ error: "invalid_grant", error_description: "client_id mismatch" });
+    }
+    const client = await query(`
+      SELECT client_secret
+      FROM oauth_clients
+      WHERE client_id = $1
+    `, [codeEntry.client_id]);
+    if (!client.rowCount) {
+      return res.status(401).json({ error: "invalid_client" });
+    }
+    const storedSecret = client.rows[0].client_secret;
+    if (storedSecret && client_secret && client_secret !== storedSecret) {
+      return res.status(401).json({ error: "invalid_client" });
     }
     if (codeEntry.code_challenge) {
       if (!code_verifier) {
@@ -825,12 +892,17 @@ if (TRANSPORT === "http") {
     }
     oauthCodes.delete(code);
     const accessToken = crypto.randomBytes(48).toString("hex");
-    oauthTokens.set(accessToken, { client_id: codeEntry.client_id, created: Date.now() });
+    const expiresIn = 86400 * 365;
+    const expiresAt = new Date(Date.now() + expiresIn * 1000);
+    await query(`
+      INSERT INTO oauth_tokens (token, client_id, expires_at)
+      VALUES ($1, $2, $3)
+    `, [accessToken, codeEntry.client_id, expiresAt]);
     console.error(`\u{1f511} OAuth token issued for client: ${codeEntry.client_id}`);
     res.json({
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: 86400 * 365,
+      expires_in: expiresIn,
     });
   });
 
@@ -906,18 +978,33 @@ if (TRANSPORT === "http") {
           (SELECT COUNT(*) FROM notes)  AS notes,
           (SELECT COUNT(*) FROM chunks) AS chunks,
           (SELECT COUNT(*) FROM links)  AS links,
-          (SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL) AS embedded`),
-        query(`SELECT MAX(synced_at) AS last_sync FROM sync_log`),
+          (SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL) AS embedded,
+          (SELECT COUNT(*)
+             FROM notes n
+             WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.note_path = n.path)
+          ) AS notes_without_chunks`),
+        query(`
+          SELECT synced_at, status, notes_failed, failed_paths, error, duration_ms
+          FROM sync_log
+          ORDER BY synced_at DESC
+          LIMIT 1
+        `),
         query(`SELECT tag, COUNT(*) AS note_count FROM notes, UNNEST(tags) AS tag
                GROUP BY tag ORDER BY note_count DESC LIMIT 10`),
       ]);
+      const latestSync = lastSync.rows[0] || {};
       res.json({
-        notes:    parseInt(counts.rows[0].notes),
-        chunks:   parseInt(counts.rows[0].chunks),
-        links:    parseInt(counts.rows[0].links),
-        embedded: parseInt(counts.rows[0].embedded),
-        lastSync: lastSync.rows[0].last_sync,
-        topTags:  topTags.rows,
+        notes:              parseInt(counts.rows[0].notes),
+        chunks:             parseInt(counts.rows[0].chunks),
+        links:              parseInt(counts.rows[0].links),
+        embedded:           parseInt(counts.rows[0].embedded),
+        notesWithoutChunks: parseInt(counts.rows[0].notes_without_chunks),
+        lastSync:           latestSync.synced_at || null,
+        lastSyncStatus:     latestSync.status || null,
+        lastSyncFailed:     parseInt(latestSync.notes_failed || 0),
+        lastSyncFailedPaths: latestSync.failed_paths || [],
+        lastSyncError:      latestSync.error || null,
+        topTags:            topTags.rows,
       });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -974,19 +1061,56 @@ if (TRANSPORT === "http") {
     try {
       const [dbCheck, syncInfo, counts] = await Promise.all([
         query("SELECT 1"),
-        query("SELECT MAX(synced_at) AS last_sync FROM sync_log"),
-        query("SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT COUNT(*) FROM chunks) AS chunks"),
+        query(`
+          SELECT synced_at, status, notes_failed, failed_paths, error
+          FROM sync_log
+          ORDER BY synced_at DESC
+          LIMIT 1
+        `),
+        query(`SELECT
+          (SELECT COUNT(*) FROM notes) AS notes,
+          (SELECT COUNT(*) FROM chunks) AS chunks,
+          (SELECT COUNT(*)
+             FROM notes n
+             WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.note_path = n.path)
+          ) AS notes_without_chunks`),
       ]);
 
-      const lastSync = syncInfo.rows[0]?.last_sync;
+      const latestSync = syncInfo.rows[0] || {};
+      const lastSync = latestSync.synced_at;
       const indexAgeSec = lastSync ? Math.round((Date.now() - new Date(lastSync).getTime()) / 1000) : null;
       const vaultPath = process.env.VAULT_PATH || "/vault";
       const vaultOk = vaultPath ? existsSync(vaultPath) : null;
+      const notesWithoutChunks = parseInt(counts.rows[0]?.notes_without_chunks || 0);
+
+      const embedding = {
+        health_ok: false,
+        probe_ok: false,
+        model: null,
+        dimension: null,
+        error: null,
+      };
+      try {
+        const healthUrl = EMBED_URL.replace(/\/embed$/, "/health");
+        const embedHealth = await fetchWithTimeout(healthUrl, {}, 5000);
+        if (!embedHealth.ok) throw new Error(`health ${embedHealth.status}`);
+        const body = await embedHealth.json();
+        embedding.health_ok = true;
+        embedding.model = body.model || null;
+        embedding.dimension = body.dim || body.dimension || null;
+        await embedText("memex health probe");
+        embedding.probe_ok = true;
+      } catch (e) {
+        embedding.error = e.message;
+      }
 
       let status = "ok";
       if (indexAgeSec !== null && indexAgeSec > 3600) status = "critical";
       else if (indexAgeSec !== null && indexAgeSec > 1800) status = "warn";
       if (vaultOk === false) status = "critical";
+      if (notesWithoutChunks > 0 && status === "ok") status = "warn";
+      if ((latestSync.notes_failed || 0) > 0 && status === "ok") status = "warn";
+      if (!embedding.health_ok || !embedding.probe_ok) status = "critical";
 
       res.json({
         status,
@@ -998,8 +1122,14 @@ if (TRANSPORT === "http") {
         port: HTTP_PORT,
         last_sync_at: lastSync,
         index_age_seconds: indexAgeSec,
+        last_sync_status: latestSync.status || null,
+        last_sync_failed_notes: parseInt(latestSync.notes_failed || 0),
+        last_sync_failed_paths: latestSync.failed_paths || [],
+        last_sync_error: latestSync.error || null,
         notes_count: parseInt(counts.rows[0]?.notes || 0),
         chunks_count: parseInt(counts.rows[0]?.chunks || 0),
+        notes_without_chunks: notesWithoutChunks,
+        embedding,
         vault_mount_ok: vaultOk,
       });
     } catch (e) {
@@ -1017,11 +1147,34 @@ if (TRANSPORT === "http") {
       if (q.split(/\s+/).length <= 4) {
         embedQuery = `${q} — detailed notes and how-to covering this topic`;
       }
-      const embedding = await embedText(embedQuery);
-      const embStr = `[${embedding.join(",")}]`;
-      const result = await query(`
-        SELECT * FROM search_hybrid($1, $2::vector, $3, $4)
-      `, [q, embStr, limit * 2, tags || null]);
+      let result;
+      let searchType = "hybrid";
+      try {
+        const embedding = await embedText(embedQuery);
+        const embStr = `[${embedding.join(",")}]`;
+        result = await query(`
+          SELECT * FROM search_hybrid($1, $2::vector, $3, $4)
+        `, [q, embStr, limit * 2, tags || null]);
+      } catch (e) {
+        searchType = "fts-only (embedding unavailable)";
+        result = await query(`
+          SELECT DISTINCT ON (c.note_path)
+            c.note_path,
+            n.title,
+            n.tags,
+            n.note_type,
+            c.chunk_index,
+            c.content,
+            n.modified_at,
+            ts_rank_cd(c.content_tsv, plainto_tsquery('english', $1)) AS rrf_score
+          FROM chunks c
+          JOIN notes n ON c.note_path = n.path
+          WHERE c.content_tsv @@ plainto_tsquery('english', $1)
+            ${tags?.length ? "AND n.tags && $3" : ""}
+          ORDER BY c.note_path, rrf_score DESC
+          LIMIT $2
+        `, tags?.length ? [q, limit * 2, tags] : [q, limit * 2]);
+      }
 
       // Contextual chunks for REST endpoint too
       const paths = result.rows.map(r => r.note_path);
@@ -1068,7 +1221,7 @@ if (TRANSPORT === "http") {
         for (const r of deduped) delete r.context;
       }
 
-      res.json({ query: q, results: deduped });
+      res.json({ query: q, searchType, results: deduped });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

@@ -23,15 +23,14 @@ services:
   # ── Embeddings service ────────────────────────────────────────────────────
   embeddings:
     build:
-      context: ./embeddings-service
+      context: ./embeddings
       dockerfile: Dockerfile
     container_name: vault-embeddings
     restart: unless-stopped
     ports:
       - "127.0.0.1:8765:8765"
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
-      EMBED_MODEL: text-embedding-3-small
+      EMBED_MODEL: ${EMBED_MODEL:-mixedbread-ai/mxbai-embed-large-v1}
       PORT: 8765
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || exit 1"]
@@ -48,7 +47,7 @@ services:
     container_name: vault-mcp
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3456:3456"
+      - "0.0.0.0:3456:3456"
     environment:
       PGHOST: pgvector
       PGPORT: 5432
@@ -56,7 +55,7 @@ services:
       PGUSER: ${PGUSER:-postgres}
       PGPASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
       EMBED_URL: http://embeddings:8765/embed
-      EMBED_DIM: 1536
+      EMBED_DIM: 1024
       MCP_PORT: 3456
       MCP_TRANSPORT: http
       MCP_API_KEY: ${MCP_API_KEY:?MCP_API_KEY is required}
@@ -86,6 +85,8 @@ services:
       PGUSER: ${PGUSER:-postgres}
       PGPASSWORD: ${PGPASSWORD:?PGPASSWORD is required}
       SYNC_INTERVAL_SEC: ${SYNC_INTERVAL_SEC:-900}
+      EMBEDDINGS_MODEL: ${EMBED_MODEL:-mixedbread-ai/mxbai-embed-large-v1}
+      EMBEDDINGS_DIM: 1024
     volumes:
       - ${VAULT_PATH:?VAULT_PATH is required}:/vault:ro
       # Source files mounted so filter/logic patches do not require image rebuild

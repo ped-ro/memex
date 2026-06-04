@@ -36,13 +36,13 @@ DB_HOST     = os.environ.get("PGHOST", "localhost")
 DB_PORT     = int(os.environ.get("PGPORT", "5433"))
 DB_NAME     = os.environ.get("PGDATABASE", "obsidian")
 DB_USER     = os.environ.get("PGUSER", "postgres")
-DB_PASS     = os.environ.get("PGPASSWORD", "Parad1seL0st#1")
+DB_PASS     = os.environ.get("PGPASSWORD", "")
 
 VAULT_PATH       = Path(os.environ.get("VAULT_PATH", "/Volumes/home/Obsidian"))
 _raw_embed_url = os.environ.get("EMBED_URL", "http://localhost:8765/embed")
 EMBEDDINGS_URL   = os.environ.get("EMBEDDINGS_URL", _raw_embed_url.rsplit("/embed", 1)[0] if _raw_embed_url.endswith("/embed") else _raw_embed_url)
-EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDINGS_DIM   = int(os.environ.get("EMBEDDINGS_DIM", "384"))
+EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "mixedbread-ai/mxbai-embed-large-v1")
+EMBEDDINGS_DIM   = int(os.environ.get("EMBEDDINGS_DIM", "1024"))
 
 CHUNK_TOKENS    = 512       # target tokens per chunk
 CHUNK_OVERLAP   = 50        # overlap tokens between chunks
@@ -200,7 +200,14 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     )
     response.raise_for_status()
     data = response.json()
-    return data["embeddings"]
+    embeddings = data["embeddings"]
+    if embeddings:
+        dim = len(embeddings[0])
+        if dim != EMBEDDINGS_DIM:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: service returned {dim}, expected {EMBEDDINGS_DIM}"
+            )
+    return embeddings
 
 # ── DB helpers ──────────────────────────────────────────────────────────────────
 
@@ -386,7 +393,7 @@ def main():
                     for chunk, emb in zip(batch, embeddings):
                         chunk["embedding"] = emb
                     progress = min(i + EMBED_BATCH, len(all_chunks))
-                    print(f"   {progress}/{len(all_chunks)} chunks embedded...", end="\r")
+                    print(f"   {progress}/{len(all_chunks)} chunks embedded...", flush=True)
                 except Exception as e:
                     print(f"\n  ⚠️  Embedding error at batch {i}: {e}")
                     raise

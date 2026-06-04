@@ -97,8 +97,8 @@ def upsert_note(conn, note: dict):
         ))
 
 
-def upsert_chunks(conn, note: dict):
-    """Chunk, embed, and insert/update chunks for a single note."""
+def upsert_note_and_chunks(conn, note: dict):
+    """Embed first, then commit note metadata and chunks together."""
     chunks = chunk_text(note["content"])
     chunk_objs = [
         {"note_path": note["path"], "chunk_index": i,
@@ -112,6 +112,7 @@ def upsert_chunks(conn, note: dict):
     for obj, emb in zip(chunk_objs, embeddings):
         obj["embedding"] = emb
 
+    upsert_note(conn, note)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM chunks WHERE note_path = %s", (note["path"],))
         psycopg2.extras.execute_batch(cur, """
@@ -197,44 +198,59 @@ def main():
         delete_note(conn, path)
         print(f"  🗑️  {path}")
 
-    # ── Upsert metadata for ALL notes (cheap, keeps tags/titles fresh) ────────
+    # ── Upsert metadata for unchanged notes only.
+    # New/changed notes commit their content_hash only after embedding succeeds.
+    embedding_paths = {n["path"] for n in needs_embedding}
     for note in all_notes:
+        if note["path"] in embedding_paths:
+            continue
         upsert_note(conn, note)
     conn.commit()
 
     # ── Chunk and embed only new/changed notes ────────────────────────────────
     total_chunks = 0
+    failed_paths = []
     for i, note in enumerate(needs_embedding, 1):
         tag = "➕" if note["path"] not in db_paths else "🔄"
         try:
-            n_chunks = upsert_chunks(conn, note)
+            n_chunks = upsert_note_and_chunks(conn, note)
             total_chunks += n_chunks
+            conn.commit()
             print(f"  {tag} {note['path']} ({n_chunks} chunks)")
         except Exception as e:
             print(f"  ⚠️  Error embedding {note['path']}: {e}")
-            # Commit what we have so far so we don't lose progress
-            conn.commit()
+            conn.rollback()
+            failed_paths.append(note["path"])
             continue
-
-    conn.commit()
 
     # ── Refresh wiki-links ────────────────────────────────────────────────────
     resolve_wikilinks(conn, all_notes)
 
     duration_ms = int((time.time() - t_start) * 1000)
+    status = "partial" if failed_paths else "ok"
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO sync_log (notes_added, notes_updated, notes_deleted, chunks_total, duration_ms)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO sync_log (
+                notes_added, notes_updated, notes_deleted, chunks_total,
+                duration_ms, notes_failed, failed_paths, status, error
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             len(new_notes),
             len(changed_notes),
             len(deleted_paths),
             total_chunks,
             duration_ms,
+            len(failed_paths),
+            failed_paths,
+            status,
+            "embedding failures" if failed_paths else None,
         ))
     conn.commit()
     conn.close()
+    if failed_paths:
+        print(f"  ⚠️  Done with {len(failed_paths)} failed note(s) in {duration_ms/1000:.1f}s")
+        sys.exit(1)
     print(f"  ✅ Done in {duration_ms/1000:.1f}s")
 
 
