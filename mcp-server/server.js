@@ -133,7 +133,7 @@ function deduplicateByNote(results, limit) {
         const seen = new Set();
         const sections = [];
         for (const { context: ctx } of chunks) {
-          for (const section of ctx.split("\n\n---\n\n")) {
+          for (const section of (ctx || "").split("\n\n---\n\n")) {
             const trimmed = section.trim();
             if (trimmed && !seen.has(trimmed)) {
               seen.add(trimmed);
@@ -726,8 +726,19 @@ registerTools(server);
 
 if (TRANSPORT === "http") {
   const app = express();
+  app.set("trust proxy", true);
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+
+  function publicBaseUrl(req) {
+    const configured = (process.env.MCP_PUBLIC_BASE_URL || process.env.PUBLIC_BASE_URL || "").trim();
+    if (configured) return configured.replace(/\/+$/, "");
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+    const protocol = forwardedProto || req.protocol;
+    const host = forwardedHost || req.get("host");
+    return `${protocol}://${host}`;
+  }
 
   // Short-lived authorization codes stay in memory; durable clients/tokens live in Postgres.
   const oauthCodes = new Map(); // code -> { client_id, redirect_uri, expires }
@@ -775,7 +786,7 @@ if (TRANSPORT === "http") {
 
   // Discovery metadata
   app.get("/.well-known/oauth-authorization-server", (req, res) => {
-    const issuer = `${req.protocol}://${req.get("host")}`;
+    const issuer = publicBaseUrl(req);
     res.json({
       issuer,
       authorization_endpoint: `${issuer}/authorize`,
